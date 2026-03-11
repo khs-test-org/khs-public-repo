@@ -1,32 +1,25 @@
 name: Request L2 after L1 approval
-
 on:
   pull_request_review:
     types: [submitted]
 
 permissions:
   pull-requests: write
-  contents: read
 
 jobs:
   request_l2:
-    if: "github.event.review.state == 'approved'"
+    if: ${{ github.event.review.state == 'approved' }}
     runs-on: ubuntu-latest
-
     steps:
       - name: Request L2 team review
-        uses: actions/github-script@v7
-        with:
-          # IMPORTANT: this is what fixes your error
-          github-token: ${{ secrets.L2_REVIEW_TOKEN }}
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const pull_number = context.payload.pull_request.number;
-
-            await github.rest.pulls.requestReviewers({
-              owner,
-              repo,
-              pull_number,
-              team_reviewers: ["l2review"]
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/${OWNER}/${REPO}/pulls/${PR}/requested_reviewers \
+            -d '{"team_reviewers":["l2review"]}'
