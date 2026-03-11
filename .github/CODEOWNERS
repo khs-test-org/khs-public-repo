@@ -5,21 +5,9 @@
 # =========================================================
 
 # 0) Fallback owners for everything
-* @khs-test-org/malbek-reviewers
+* @khs-test-org/reviewteam
 
-# 1) Documentation (current)
-README.md @khs-test-org/docs-reviewers
-docs/ @khs-test-org/docs-reviewers
-
-# 2) GitHub automation & repo governance
-.github/ @khs-test-org/devops
-.github/workflows/ @khs-test-org/devops
-.github/CODEOWNERS @khs-test-org/devops
-
-# 3) Future folder routing (activate when these folders exist)
-src/ @khs-test-org/backend-reviewers
-ui/ @khs-test-org/frontend-reviewers
-api/ @khs-test-org/backend-reviewers
-db/ @khs-test-org/db-reviewers
-tests/ @khs-test-org/qa-reviewers
-infra/ @khs-test-org/devops
+# 1) Future folder routing (activate when these folders exist)
+First/ @khs-test-org/teamnayan
+Second/ @khs-test-org/team1
+Third/ @khs-test-org/team2
