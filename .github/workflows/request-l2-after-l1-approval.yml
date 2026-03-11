@@ -1,24 +1,57 @@
 name: Request L2 after L1 approval
+
 on:
   pull_request_review:
     types: [submitted]
 
+# Minimum permissions for this workflow
 permissions:
   pull-requests: write
+  contents: read
 
 jobs:
   request_l2:
+    # Run only when the submitted review is an approval
     if: "github.event.review.state == 'approved'"
     runs-on: ubuntu-latest
+
     steps:
-      - name: Request L2 team review
+      - name: Request L2 team review (after L1 approval)
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # IMPORTANT:
+          # Use a fine-grained PAT stored as a repo secret (recommended for team_reviewers).
+          # Default GITHUB_TOKEN often fails with: "Could not resolve to a node with the global id..."
+          github-token: ${{ secrets.L2_REVIEW_TOKEN }}
           script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
+
+            // Team slug from your URL:
+            // https://github.com/orgs/khs-test-org/teams/l2review
+            const l2TeamSlug = "l2review";
+
+            // OPTIONAL: Avoid re-requesting if already requested
+            const rr = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number
+            });
+
+            const alreadyRequested =
+              (rr.data.teams || []).some(t => (t.slug || "").toLowerCase() === l2TeamSlug);
+
+            if (alreadyRequested) {
+              core.info(`L2 team '${l2TeamSlug}' is already requested. Skipping.`);
+              return;
+            }
+
             await github.rest.pulls.requestReviewers({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-              team_reviewers: ["l2review"]
-            })
+              owner,
+              repo,
+              pull_number,
+              team_reviewers: [l2TeamSlug]
+            });
+
+            core.info(`Requested L2 review from team '${l2TeamSlug}' on PR #${pull_number}.`);
