@@ -22,5 +22,5 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             https://api.github.com/repos/${OWNER}/${REPO}/pulls/${PR}/requested_reviewers \
-            -d '{"team_reviewers":["review-l2"]}'
+            -d '{"team_reviewers":["L2Review"]}'
 ``
