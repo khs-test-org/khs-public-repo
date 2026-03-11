@@ -1,0 +1,25 @@
+# =========================================================
+# khs-test-org/khs-public-repo - CODEOWNERS
+# Current tree: README.md only (no folders yet)
+# Last matching rule wins.
+# =========================================================
+
+# 0) Fallback owners for everything
+* @khs-test-org/malbek-reviewers
+
+# 1) Documentation (current)
+README.md @khs-test-org/docs-reviewers
+docs/ @khs-test-org/docs-reviewers
+
+# 2) GitHub automation & repo governance
+.github/ @khs-test-org/devops
+.github/workflows/ @khs-test-org/devops
+.github/CODEOWNERS @khs-test-org/devops
+
+# 3) Future folder routing (activate when these folders exist)
+src/ @khs-test-org/backend-reviewers
+ui/ @khs-test-org/frontend-reviewers
+api/ @khs-test-org/backend-reviewers
+db/ @khs-test-org/db-reviewers
+tests/ @khs-test-org/qa-reviewers
+infra/ @khs-test-org/devops
