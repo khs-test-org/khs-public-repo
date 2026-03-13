@@ -1,0 +1,277 @@
+name: Approval Gate
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  gate:
+    name: Approval Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Evaluate approvals and advance stages
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.REVIEW_GATE_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const pr    = context.payload.pull_request;
+            if (!pr) {
+              core.info("No pull_request in payload (ignoring).");
+              return;
+            }
+            const pull_number = pr.number;
+
+            const SNAPSHOT_MARKER = "<!--reviewer-snapshot-->";
+            const STAGE_LABELS = ["stage:prel1","stage:l1","stage:l2","stage:done"];
+
+            const L1_TEAM = "reviewteam";
+            const L2_TEAM = "l2review";
+
+            // ----------------------------
+            // Helpers
+            // ----------------------------
+            const uniq = (arr) => [...new Set(arr)];
+            const nowIso = () => new Date().toISOString();
+
+            async function getTeamMembers(team_slug) {
+              // Requires read:org on the token
+              const members = await github.paginate(
+                github.rest.teams.listMembersInOrg,
+                { org: owner, team_slug, per_page: 100 }
+              );
+              return new Set(members.map(m => m.login.toLowerCase()));
+            }
+
+            async function listReviews() {
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                { owner, repo, pull_number, per_page: 100 }
+              );
+              return reviews;
+            }
+
+            function latestReviewStateByUser(reviews) {
+              // Keep the latest review per user (chronological list)
+              const latest = new Map();
+              for (const r of reviews) {
+                if (!r.user || !r.user.login) continue;
+                latest.set(r.user.login.toLowerCase(), r.state); // APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED
+              }
+              return latest;
+            }
+
+            async function getOrCreateStageLabel() {
+              const issue = await github.rest.issues.get({ owner, repo, issue_number: pull_number });
+              const labels = (issue.data.labels || []).map(l => (typeof l === "string" ? l : l.name));
+              const stage = labels.find(l => STAGE_LABELS.includes(l));
+              if (stage) return stage;
+
+              // Default stage
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: pull_number, labels: ["stage:prel1"]
+              });
+              return "stage:prel1";
+            }
+
+            async function setStage(newStage) {
+              const issue = await github.rest.issues.get({ owner, repo, issue_number: pull_number });
+              const labels = (issue.data.labels || []).map(l => (typeof l === "string" ? l : l.name));
+              const toRemove = labels.filter(l => STAGE_LABELS.includes(l) && l !== newStage);
+              for (const l of toRemove) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: pull_number, name: l });
+                } catch (e) {}
+              }
+              if (!labels.includes(newStage)) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [newStage] });
+              }
+            }
+
+            async function upsertSnapshot(requestedTeams, requestedUsers) {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: pull_number, per_page: 100 }
+              );
+
+              const existing = comments.find(c => (c.body || "").includes(SNAPSHOT_MARKER));
+              const payload = {
+                createdAt: nowIso(),
+                requestedTeams: uniq(requestedTeams),
+                requestedUsers: uniq(requestedUsers)
+              };
+
+              const body = `${SNAPSHOT_MARKER}\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: existing.id, body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number, body
+                });
+              }
+              return payload;
+            }
+
+            async function readSnapshotOrCreate() {
+              // Fetch current requested reviewers/teams from PR object (best-effort)
+              // (Teams + users are in the PR payload on opened; later events may still include pull_request.*)
+              const prInfo = await github.rest.pulls.get({ owner, repo, pull_number });
+
+              const requestedTeams = (prInfo.data.requested_teams || []).map(t => t.slug || t.name).filter(Boolean);
+              const requestedUsers = (prInfo.data.requested_reviewers || []).map(u => u.login).filter(Boolean);
+
+              // Store a snapshot so Stage-0 has stable requirements
+              return await upsertSnapshot(requestedTeams, requestedUsers);
+            }
+
+            async function getSnapshot() {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: pull_number, per_page: 100 }
+              );
+              const snap = comments.find(c => (c.body || "").includes(SNAPSHOT_MARKER));
+              if (!snap) return null;
+
+              // Extract JSON from fenced block
+              const m = snap.body.match(/```json\s*([\s\S]*?)\s*```/);
+              if (!m) return null;
+              try { return JSON.parse(m[1]); } catch { return null; }
+            }
+
+            async function requestTeam(team_slug) {
+              // Request reviewers API accepts team_reviewers by slug
+              await github.rest.pulls.requestReviewers({
+                owner, repo, pull_number,
+                team_reviewers: [team_slug],
+                reviewers: []
+              });
+            }
+
+            function approvalsSatisfiedForUsers(requiredUsers, latestByUser) {
+              const missing = [];
+              for (const u of requiredUsers) {
+                const state = latestByUser.get(u.toLowerCase());
+                if (state !== "APPROVED") missing.push(u);
+              }
+              return { ok: missing.length === 0, missing };
+            }
+
+            async function approvalsSatisfiedForTeams(requiredTeams, latestByUser) {
+              const missingTeams = [];
+              const details = [];
+              for (const team of requiredTeams) {
+                const members = await getTeamMembers(team);
+                let ok = false;
+                for (const [login, state] of latestByUser.entries()) {
+                  if (state === "APPROVED" && members.has(login)) { ok = true; break; }
+                }
+                details.push({ team, ok });
+                if (!ok) missingTeams.push(team);
+              }
+              return { ok: missingTeams.length === 0, missingTeams, details };
+            }
+
+            // ----------------------------
+            // Main logic
+            // ----------------------------
+            // Ensure snapshot exists (create on PR open/ready/sync)
+            let snapshot = await getSnapshot();
+            if (!snapshot && ["opened","reopened","ready_for_review","synchronize"].includes(context.payload.action)) {
+              snapshot = await readSnapshotOrCreate();
+            }
+            if (!snapshot) {
+              // If review event came first, create snapshot now
+              snapshot = await readSnapshotOrCreate();
+            }
+
+            const stage = await getOrCreateStageLabel();
+
+            const reviews = await listReviews(); // official PR reviews API [5](https://docs.github.com/en/rest/pulls/reviews) (conceptually)
+            const latestByUser = latestReviewStateByUser(reviews);
+
+            // Stage 0 requirements
+            const requiredTeams0 = (snapshot.requestedTeams || []).map(x => x.toString());
+            const requiredUsers0 = (snapshot.requestedUsers || []).map(x => x.toString());
+
+            if (stage === "stage:prel1") {
+              const usersRes = approvalsSatisfiedForUsers(requiredUsers0, latestByUser);
+              const teamsRes = await approvalsSatisfiedForTeams(requiredTeams0, latestByUser);
+
+              if (usersRes.ok && teamsRes.ok) {
+                // Advance to L1
+                await requestTeam(L1_TEAM);
+                await setStage("stage:l1");
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number,
+                  body: `✅ Pre-L1 gate satisfied (all required teams + explicit users). Requested L1 team @${owner}/${L1_TEAM}.`
+                });
+                core.setOutput("gate", "advanced-to-l1");
+                core.notice("Advanced to L1");
+                // Fail the check until L2 is approved (so merge stays blocked)
+                core.setFailed("Waiting for L1 approval.");
+                return;
+              } else {
+                const msg =
+                  `⛔ Pre-L1 gate not satisfied.\n` +
+                  (usersRes.ok ? "" : `Missing user approvals: ${usersRes.missing.join(", ")}\n`) +
+                  (teamsRes.ok ? "" : `Missing team approvals: ${teamsRes.missingTeams.join(", ")}\n`);
+                core.setFailed(msg);
+                return;
+              }
+            }
+
+            // Stage 1 (L1 team approval)
+            if (stage === "stage:l1") {
+              const l1Res = await approvalsSatisfiedForTeams([L1_TEAM], latestByUser);
+              if (l1Res.ok) {
+                await requestTeam(L2_TEAM);
+                await setStage("stage:l2");
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number,
+                  body: `✅ L1 approved. Requested L2 team @${owner}/${L2_TEAM}.`
+                });
+                core.setFailed("Waiting for L2 approval.");
+                return;
+              } else {
+                core.setFailed(`⛔ Waiting for at least one approval from L1 team: ${L1_TEAM}`);
+                return;
+              }
+            }
+
+            // Stage 2 (L2 team approval)
+            if (stage === "stage:l2") {
+              const l2Res = await approvalsSatisfiedForTeams([L2_TEAM], latestByUser);
+              if (l2Res.ok) {
+                await setStage("stage:done");
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull_number,
+                  body: `🎉 L2 approved. PR is now fully approved and ready to merge.`
+                });
+                core.notice("Gate PASSED");
+                return;
+              } else {
+                core.setFailed(`⛔ Waiting for at least one approval from L2 team: ${L2_TEAM}`);
+                return;
+              }
+            }
+
+            // Done
+            if (stage === "stage:done") {
+              core.notice("Already fully approved.");
+              return;
+            }
+
+            // Default
+            core.setFailed("Unknown stage label state.");
